@@ -2,54 +2,95 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME   = 'maker-website'
-        REGISTRY     = 'your-dockerhub-username'          // ← change me
-        IMAGE_TAG    = "${env.BUILD_NUMBER}"
-        DOCKER_CREDS = 'docker-credentials-id'            // ← Jenkins credential ID
+        DOCKER_CREDENTIALS_ID = 'docker-cred'
+        DOCKER_IMAGE          = 'mubashir594/maker'
+
+        SONAR_SERVER_NAME     = 'sonarqube_env'
+        SONAR_SCANNER_TOOL    = 'sonar-scanner'
+
+        GIT_CREDENTIALS_ID    = 'github-cred'
+        MANIFEST_REPO         = 'https://github.com/Mubashir594/maker_project.git'
+        MANIFEST_BRANCH       = 'main'
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Checkout Source Code') {
             steps {
-                echo 'Passed...'
+                checkout scm
             }
         }
 
-        stage('Build and Test') {
-            steps {
-                echo 'Building project...'
-                // Add your build command here, e.g: sh 'npm install'
-                echo 'Running tests...'
-                // Add your test command here, e.g: sh 'npm test'
-            }
-        }
-
-        stage('Docker Build and Push') {
+        stage('SonarQube Analysis') {
             steps {
                 script {
-                    docker.withRegistry('', "${DOCKER_CREDS}") {
-                        def img = docker.build("${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}")
-                        img.push()
-                        img.push('latest')
+                    def scannerHome = tool "${SONAR_SCANNER_TOOL}"
+
+                    withSonarQubeEnv("${SONAR_SERVER_NAME}") {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=maker-key \
+                            -Dsonar.projectName=maker-project \
+                            -Dsonar.sources=.
+                        """
                     }
                 }
             }
         }
 
-        stage('Update Deployment File') {
+        stage('Build & Push Docker Image') {
             steps {
-                sh """
-                    sed -i 's|IMAGE_PLACEHOLDER|${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}|g' manifests/deployment.yaml
-                    cat manifests/deployment.yaml
-                """
+                script {
+                    docker.withRegistry(
+                        'https://index.docker.io/v1/',
+                        "${DOCKER_CREDENTIALS_ID}"
+                    ) {
+                        def appImage = docker.build(
+                            "${DOCKER_IMAGE}:${env.BUILD_NUMBER}",
+                            '.'
+                        )
+
+                        appImage.push()
+                        appImage.push('latest')
+                    }
+                }
             }
         }
 
+        stage('Update Manifest Repo') {
+            steps {
+                dir('manifest-workspace') {
+
+                    git branch: "${MANIFEST_BRANCH}",
+                        credentialsId: "${GIT_CREDENTIALS_ID}",
+                        url: "${MANIFEST_REPO}"
+
+                    sh """
+                        sed -i '/name: maker/{n;s|image:.*|image: ${DOCKER_IMAGE}:${env.BUILD_NUMBER}|}' k8s/deployment.yaml
+
+                        git config user.name 'Mubashir594'
+                        git config user.email 'mubumubashir594@gmail.com'
+
+                        git add k8s/deployment.yaml
+
+                        git commit -m "chore(manifest): update maker image tag to ${env.BUILD_NUMBER} [skip ci]" || echo "No manifest changes to commit"
+
+                        git push origin ${MANIFEST_BRANCH}
+                    """
+                }
+            }
+        }
     }
 
     post {
-        success { echo "✅ Pipeline succeeded — image: ${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" }
-        failure { echo "❌ Pipeline failed." }
+        success {
+            echo 'Pipeline executed successfully!'
+            echo "Docker image: ${DOCKER_IMAGE}:${BUILD_NUMBER}"
+            echo 'Manifest repository updated successfully!'
+        }
+
+        failure {
+            echo 'Pipeline failed. Please check the Console Output.'
+        }
     }
 }
