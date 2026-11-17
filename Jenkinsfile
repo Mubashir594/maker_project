@@ -14,10 +14,9 @@ pipeline {
     }
 
     stages {
-
         stage('Checkout Source Code') {
             steps {
-                checkout scm
+                echo "passed"
             }
         }
 
@@ -25,72 +24,62 @@ pipeline {
             steps {
                 script {
                     def scannerHome = tool "${SONAR_SCANNER_TOOL}"
-
                     withSonarQubeEnv("${SONAR_SERVER_NAME}") {
-                        sh """
-                            ${scannerHome}/bin/sonar-scanner \
+                        sh "${scannerHome}/bin/sonar-scanner \
                             -Dsonar.projectKey=maker-key \
-                            -Dsonar.projectName=maker-project \
-                            -Dsonar.sources=.
+                            -Dsonar.projectName='maker-project' \
+                            -Dsonar.sources=."
+                    }
+                }
+            }
+        }
+
+        stage('Build & Post Docker Image') {
+    steps {
+        script {
+            withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDENTIALS_ID}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                sh """
+                    echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
+                    
+                    docker build -t ${DOCKER_IMAGE}:${env.BUILD_NUMBER} -t ${DOCKER_IMAGE}:latest -f maker/Dockerfile maker
+                    
+                    docker push ${DOCKER_IMAGE}:${env.BUILD_NUMBER}
+                    docker push ${DOCKER_IMAGE}:latest
+                """
+            }
+        }
+    }
+}
+
+       stage('Update Manifest Repo') {
+            steps {
+                dir('manifest-workspace') {
+                    withCredentials([usernamePassword(credentialsId: 'github-cred', usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+                        sh """
+                            # Configure remote URL with properly escaped variables for pushing
+                            git remote set-url origin https://\${GH_USER}:\${GH_TOKEN}@github.com/suhaaail2004/maker_pipeline.git
+                            
+                            # Fetch and rebase to get any latest changes from remote
+                            git pull --rebase origin main
+                            
+                            # Perform sed update, commit, and push
+                            sed -i '/name: maker/{n;s|image:.*|image: 8089278330/maker:${env.BUILD_NUMBER}|}' maker/manifests/deployment.yaml
+                            git config user.name "Mubashir594"
+                            git config user.email "mubumubashir594@gmail.com"
+                            git commit -am "chore(manifest): update maker image tag to ${env.BUILD_NUMBER} [skip ci]"
+                            git push origin main
                         """
                     }
                 }
             }
         }
-
-        stage('Build & Push Docker Image') {
-            steps {
-                script {
-                    docker.withRegistry(
-                        'https://index.docker.io/v1/',
-                        "${DOCKER_CREDENTIALS_ID}"
-                    ) {
-                        def appImage = docker.build(
-                            "${DOCKER_IMAGE}:${env.BUILD_NUMBER}",
-                            '.'
-                        )
-
-                        appImage.push()
-                        appImage.push('latest')
-                    }
-                }
-            }
-        }
-
-        stage('Update Manifest Repo') {
-            steps {
-                dir('manifest-workspace') {
-
-                    git branch: "${MANIFEST_BRANCH}",
-                        credentialsId: "${GIT_CREDENTIALS_ID}",
-                        url: "${MANIFEST_REPO}"
-
-                    sh """
-                        sed -i '/name: maker/{n;s|image:.*|image: ${DOCKER_IMAGE}:${env.BUILD_NUMBER}|}' k8s/deployment.yaml
-
-                        git config user.name 'Mubashir594'
-                        git config user.email 'mubumubashir594@gmail.com'
-
-                        git add k8s/deployment.yaml
-
-                        git commit -m "chore(manifest): update maker image tag to ${env.BUILD_NUMBER} [skip ci]" || echo "No manifest changes to commit"
-
-                        git push origin ${MANIFEST_BRANCH}
-                    """
-                }
-            }
-        }
     }
-
     post {
         success {
-            echo 'Pipeline executed successfully!'
-            echo "Docker image: ${DOCKER_IMAGE}:${BUILD_NUMBER}"
-            echo 'Manifest repository updated successfully!'
+            echo 'Pipeline executed successfully! Manifest repo updated with new image tag.'
         }
-
         failure {
-            echo 'Pipeline failed. Please check the Console Output.'
+            echo 'Pipeline failed. Please review the stage logs above.'
         }
     }
 }
